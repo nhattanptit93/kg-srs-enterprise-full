@@ -1,0 +1,8 @@
+langgraph>=0.2.50
+anthropic>=0.40.0
+sentence-transformers>=3.0.0
+faiss-cpu>=1.8.0
+python-dotenv>=1.0.0
+tenacity>=8.0.0
+mcp>=1.0.0
+##python main.py input.md
