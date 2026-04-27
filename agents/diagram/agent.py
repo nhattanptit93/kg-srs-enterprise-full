@@ -6,6 +6,7 @@ from typing import Tuple
 from core.llm import call_llm, load_skill
 from core.logger import get_logger
 from core.output_export import export_agent_output
+from core.kg_client import load_graph, list_entities_summary
 
 logger = get_logger("diagram")
 
@@ -164,7 +165,22 @@ def run(state):
         return state
 
     logger.info("Generating diagrams from SRS...")
-    user = f"SRS:\n{srs_content}"
+
+    # Inject canonical entity & state names from the knowledge graph so the
+    # diagram's stateDiagram-v2 blocks copy verbatim from the same source as
+    # SRS §6 (avoids state-name drift between SRS and diagrams).
+    graph_obj = load_graph()
+    kg_block = ""
+    if graph_obj is not None:
+        index = list_entities_summary(graph_obj)
+        stateful = [e for e in index if e.get("states")]
+        if stateful:
+            kg_block = (
+                "\n\n## CANONICAL NAMES (copy verbatim — do not paraphrase)\n"
+                + json.dumps(stateful, ensure_ascii=False, indent=2)
+            )
+
+    user = {"cached": f"SRS:\n{srs_content}", "suffix": kg_block}
     raw = call_llm(user, system=_SKILL)
 
     try:

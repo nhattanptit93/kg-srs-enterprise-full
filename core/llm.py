@@ -98,13 +98,24 @@ def call_llm(user, system: Optional[str] = None) -> str:
     return ""
 
 
-async def call_llm_with_mcp(user: str, server_script: str, system: Optional[str] = None) -> str:
+async def call_llm_with_mcp(
+    user,
+    server_script: str,
+    system: Optional[str] = None,
+    max_turns: int = 30,
+) -> str:
+    """Run an LLM tool-use loop against an MCP server.
+
+    ``user`` may be a string or ``{"cached": ..., "suffix": ...}`` (matching
+    ``call_llm``). ``max_turns`` caps the number of round-trips with the LLM
+    so a runaway tool loop can't spin forever.
+    """
     server_params = StdioServerParameters(command="python", args=[server_script])
-    
+
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            
+
             tools_response = await session.list_tools()
             anthropic_tools = [
                 {
@@ -119,8 +130,8 @@ async def call_llm_with_mcp(user: str, server_script: str, system: Optional[str]
             if anthropic_tools:
                 anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
 
-            messages = [{"role": "user", "content": user}]
-            
+            messages = [{"role": "user", "content": _build_user_content(user)}]
+
             system_param = None
             if system:
                 system_param = [
@@ -130,10 +141,8 @@ async def call_llm_with_mcp(user: str, server_script: str, system: Optional[str]
                         "cache_control": {"type": "ephemeral"},
                     }
                 ]
-            
-            # Retry loop is managed manually here if needed, or we rely on the internal calls
-            # For simplicity, we just do the tool loop
-            while True:
+
+            for turn in range(max_turns):
                 kwargs = {
                     "model": MODEL,
                     "max_tokens": MAX_TOKENS,
@@ -179,3 +188,14 @@ async def call_llm_with_mcp(user: str, server_script: str, system: Optional[str]
                         if block.type == "text":
                             return block.text
                     return ""
+
+            logger.warning(
+                f"call_llm_with_mcp: hit max_turns={max_turns} without stop_reason!=tool_use; "
+                "returning best-effort last assistant text."
+            )
+            for block in reversed(messages):
+                if block.get("role") == "assistant":
+                    for c in block.get("content", []):
+                        if getattr(c, "type", None) == "text":
+                            return c.text
+            return ""

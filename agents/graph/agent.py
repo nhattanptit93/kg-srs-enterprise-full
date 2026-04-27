@@ -1,11 +1,14 @@
 
 import json
+import os
 
 from core.llm import call_llm, load_skill
 from core.logger import get_logger
 from core.output_export import export_agent_output
 
 logger = get_logger("graph")
+
+GRAPH_JSON_PATH = os.path.join("workspace", "current_graph.json")
 
 _SKILL = load_skill("agents/graph/SKILLS.md")
 
@@ -49,6 +52,13 @@ def run(state):
         metadata["relationship_count"] = len(parsed.get("relationships", []))
         metadata["event_count"] = len(parsed.get("events", []))
 
+        # Persist canonical graph JSON for downstream agents (KG MCP server,
+        # Verify deterministic checks, Diagram entity discovery).
+        os.makedirs(os.path.dirname(GRAPH_JSON_PATH), exist_ok=True)
+        with open(GRAPH_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(parsed, f, ensure_ascii=False, indent=2)
+        metadata["graph_json_path"] = GRAPH_JSON_PATH
+
     export_agent_output("graph", output=output_payload, metadata=metadata)
 
-    return {**state, "graph": g}
+    return {**state, "graph": g, "graph_json_path": GRAPH_JSON_PATH}

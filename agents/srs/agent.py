@@ -1,21 +1,28 @@
 
 import os
 import json
+import asyncio
 from datetime import datetime, timezone
-from core.llm import call_llm, load_skill
+
+from core.llm import call_llm, call_llm_with_mcp, load_skill
 from core.memory import VectorMemory
 from core.logger import get_logger
-from core.output_export import export_agent_output
+from core.kg_client import load_graph, list_entities_summary
 
 logger = get_logger("srs")
 memory = VectorMemory()
 
 _SKILL = load_skill("agents/srs/SKILLS.md")
 
+_KG_MCP_SERVER = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "core", "kg_server.py")
+)
+
 _DUAL_OUTPUT_INSTRUCTIONS = (
     "\n\n---\n\n"
     "## OUTPUT FORMAT (HARD RULE)\n\n"
-    "Your response MUST contain exactly two sections separated by the markers below:\n\n"
+    "Your final response (after any tool use) MUST contain exactly two sections "
+    "separated by the markers below:\n\n"
     "<<<SRS_MARKDOWN>>>\n"
     "<the full SRS markdown document here, no fences around the whole thing>\n"
     "<<<SRS_SIDECAR_JSON>>>\n"
@@ -45,15 +52,19 @@ _DUAL_OUTPUT_INSTRUCTIONS = (
     "  - 'edge_cases' contains one entry per applicable category from {Race, Time, Boundary, Stale, Network, Permission, i18n, Empty, Volume, Adversarial}, prefixed by category name.\n"
     "  - Sidecar must cover every REQ-F-NNN that appears in the SRS markdown above.\n"
     "  - The sidecar JSON object must start with '{' and end with '}'. Nothing after it.\n"
+    "\n## KG QUERY GUIDANCE\n"
+    "You have MCP tools to query the knowledge graph instead of being given the full JSON inline. "
+    "Use them as needed:\n"
+    "  - ``list_entities`` / ``list_entities(type='actor')`` — discover what's in the graph\n"
+    "  - ``get_entity(entity_id)`` — fetch full schema + state_machine when writing §6 or AC\n"
+    "  - ``list_relationships(from_entity=…)`` — confirm cardinality and inverse names\n"
+    "  - ``list_events(actor=…)`` — find triggers for §3 REQ-F\n"
+    "  - ``find_state_drift(entity_id, claimed_state)`` — sanity check before writing a state name\n"
+    "Quote ``state_machine.states`` and field names verbatim from the entity record.\n"
 )
 
 
 def _split_dual_output(raw: str) -> tuple[str, dict | None]:
-    """Split LLM response into (markdown, sidecar_dict).
-
-    Falls back gracefully: if markers are missing, treats the whole response
-    as markdown and tries best-effort JSON extraction.
-    """
     md_marker = "<<<SRS_MARKDOWN>>>"
     json_marker = "<<<SRS_SIDECAR_JSON>>>"
 
@@ -80,14 +91,51 @@ def _split_dual_output(raw: str) -> tuple[str, dict | None]:
 
 def run(state):
     lessons = memory.search(state["graph"])
-    user = f"Graph:\n{state['graph']}\n\nLessons:\n{lessons}"
+
+    # Seed the LLM with a lightweight entity index. Full entity records are
+    # fetched on demand via ``get_entity`` MCP tool. This keeps the user
+    # message ~1-2K tokens instead of dumping the entire graph (~5-10K).
+    graph_obj = load_graph()
+    if graph_obj is not None:
+        index = list_entities_summary(graph_obj)
+        index_text = json.dumps(index, ensure_ascii=False, indent=2)
+        rel_count = len(graph_obj.get("relationships", []))
+        event_count = len(graph_obj.get("events", []))
+        index_summary = (
+            f"Knowledge graph index ({len(index)} entities, {rel_count} relationships, "
+            f"{event_count} events). Use MCP tools to fetch entity details when needed.\n\n"
+            f"Entity index:\n{index_text}"
+        )
+        cached = index_summary + f"\n\nLessons:\n{lessons}"
+    else:
+        # Fallback: graph file missing — fall back to embedded raw JSON behaviour.
+        logger.warning(
+            "Graph JSON file not found — falling back to inline raw graph in user prompt."
+        )
+        cached = f"Graph (raw JSON):\n{state['graph']}\n\nLessons:\n{lessons}"
+
+    suffix = (
+        "\n\nNow produce the dual-output (SRS markdown + sidecar JSON). "
+        "Query the KG MCP tools as you write each section."
+    )
 
     system = _SKILL + _DUAL_OUTPUT_INSTRUCTIONS.replace(
         "ISO 8601 UTC timestamp",
         datetime.now(timezone.utc).isoformat(),
     )
 
-    raw = call_llm(user, system=system)
+    if graph_obj is not None:
+        raw = asyncio.run(
+            call_llm_with_mcp(
+                {"cached": cached, "suffix": suffix},
+                server_script=_KG_MCP_SERVER,
+                system=system,
+                max_turns=40,
+            )
+        )
+    else:
+        raw = call_llm({"cached": cached, "suffix": suffix}, system=system)
+
     srs_markdown, sidecar = _split_dual_output(raw)
 
     srs_path = "workspace/current_srs.md"
@@ -102,6 +150,6 @@ def run(state):
         req_count = len(sidecar.get("requirements", []))
         logger.info(f"Sidecar written to {sidecar_path} with {req_count} requirement(s).")
     else:
-        logger.warning(f"Sidecar not written — JSON parse failed. SRS markdown still saved.")
+        logger.warning("Sidecar not written — JSON parse failed. SRS markdown still saved.")
 
     return {**state, "srs": srs_markdown, "srs_path": srs_path, "srs_sidecar_path": sidecar_path}
