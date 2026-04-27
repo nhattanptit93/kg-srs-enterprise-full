@@ -15,7 +15,10 @@ def run(state):
         with open(state["srs_path"], "r", encoding="utf-8") as f:
             srs_content = f.read()
 
-    qa_raw = call_llm(f"SRS:\n{srs_content}", system=_SKILL)
+    qa_raw = call_llm(
+        {"cached": f"SRS:\n{srs_content}", "suffix": ""},
+        system=_SKILL,
+    )
 
     score = 7
     issue = "CONSISTENCY"

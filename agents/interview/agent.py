@@ -35,13 +35,18 @@ def run(state):
         return state
 
     lessons = memory.search(state["input"])
-    user = f"Input: {state['input']}\nLessons: {lessons}"
-    
+    cached = f"Input: {state['input']}\nLessons: {lessons}"
+    suffix = ""
+
     if state.get("qa"):
         logger.info("Handling MISSING feedback loop.")
-        user += f"\n\nPrevious Answers: {state['answers']}\n\nQA Feedback (Missing Info):\n{state['qa']}\n\nPlease ask specific follow-up questions to fill in the missing information."
+        cached += f"\n\nPrevious Answers: {state['answers']}"
+        suffix = (
+            f"\n\nQA Feedback (Missing Info):\n{state['qa']}"
+            "\n\nPlease ask specific follow-up questions to fill in the missing information."
+        )
 
-    q = call_llm(user, system=_SKILL)
+    q = call_llm({"cached": cached, "suffix": suffix}, system=_SKILL)
     logger.info(f"Questions:\n{q}")
 
     if sys.stdin.isatty():

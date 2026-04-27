@@ -24,13 +24,18 @@ def _try_parse_graph(raw: str):
 
 
 def run(state):
-    user = f"Use Case:\n{state['usecase']}"
+    cached = f"Use Case:\n{state['usecase']}"
+    suffix = ""
 
     if state.get("qa") and state.get("graph"):
         logger.info("Handling LOGIC feedback loop.")
-        user += f"\n\nPrevious Graph:\n{state['graph']}\n\nQA Feedback (Logic Errors to Fix):\n{state['qa']}\n\nPlease output a corrected Knowledge Graph JSON."
+        cached += f"\n\nPrevious Graph:\n{state['graph']}"
+        suffix = (
+            f"\n\nQA Feedback (Logic Errors to Fix):\n{state['qa']}"
+            "\n\nPlease output a corrected Knowledge Graph JSON."
+        )
 
-    g = call_llm(user, system=_SKILL)
+    g = call_llm({"cached": cached, "suffix": suffix}, system=_SKILL)
 
     parsed = _try_parse_graph(g)
     output_payload = parsed if parsed is not None else {"raw": g}

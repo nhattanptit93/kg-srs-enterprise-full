@@ -29,16 +29,50 @@ def _get_client() -> anthropic.Anthropic:
 
 
 def load_skill(path: str) -> str:
+    """Load a SKILLS.md file (EN-only, used as the system prompt).
+
+    Bilingual sources are split offline by ``tools/split_skills.py`` into
+    ``SKILLS.md`` (English) and ``SKILLS-vn.md`` (Vietnamese). This loader
+    just reads the file as-is.
+    """
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
 
+def _build_user_content(user):
+    """Accept either a plain string or a dict {"cached": str, "suffix": str}.
+
+    When a dict is provided, the cached portion gets its own ``cache_control``
+    breakpoint so repeated invocations within the 5-min TTL hit the cache.
+    """
+    if isinstance(user, str):
+        return user
+    cached = user.get("cached", "")
+    suffix = user.get("suffix", "")
+    blocks = []
+    if cached:
+        blocks.append({
+            "type": "text",
+            "text": cached,
+            "cache_control": {"type": "ephemeral"},
+        })
+    if suffix:
+        blocks.append({"type": "text", "text": suffix})
+    return blocks if blocks else ""
+
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
-def call_llm(user: str, system: Optional[str] = None) -> str:
+def call_llm(user, system: Optional[str] = None) -> str:
+    """Call Claude with optional cached system + optional cached user prefix.
+
+    ``user`` may be a string (no user-side caching) or
+    ``{"cached": str, "suffix": str}`` to put a cache breakpoint after the
+    cached portion.
+    """
     kwargs = {
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
-        "messages": [{"role": "user", "content": user}],
+        "messages": [{"role": "user", "content": _build_user_content(user)}],
     }
     if system:
         kwargs["system"] = [
@@ -79,7 +113,12 @@ async def call_llm_with_mcp(user: str, server_script: str, system: Optional[str]
                     "input_schema": t.inputSchema
                 } for t in tools_response.tools
             ]
-            
+            # Place a cache breakpoint on the last tool: every multi-turn refine
+            # session re-sends the full tool array each turn, so caching it
+            # eliminates redundant tool-schema input tokens after the first turn.
+            if anthropic_tools:
+                anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
+
             messages = [{"role": "user", "content": user}]
             
             system_param = None

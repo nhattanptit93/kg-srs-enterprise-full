@@ -1,3 +1,7 @@
+import json
+import os
+import re
+
 from core.llm import call_llm
 from core.memory import VectorMemory
 from core.config import SCORE_THRESHOLD
@@ -7,6 +11,49 @@ from core.output_export import export_agent_output
 logger = get_logger("memorize")
 
 memory = VectorMemory()
+
+
+def _summarize_srs(srs_text: str, sidecar_path: str = "workspace/current_srs.json") -> str:
+    """Produce a compact summary of the SRS for lesson distillation.
+
+    Lessons are domain-level insights — they don't need every AC verbatim.
+    Prefer the structured sidecar JSON (entity/req-level facts) plus the
+    markdown's heading skeleton. Falls back to first-N-chars if neither
+    works, to stay safe.
+    """
+    parts: list[str] = []
+
+    if os.path.exists(sidecar_path):
+        try:
+            with open(sidecar_path, "r", encoding="utf-8") as f:
+                sidecar = json.load(f)
+            reqs = sidecar.get("requirements", [])
+            req_lines = []
+            for r in reqs:
+                title = r.get("title", "")
+                priority = r.get("priority", "")
+                edge = r.get("edge_cases", [])
+                edge_cats = ",".join(
+                    e.split(":", 1)[0].strip() for e in edge if ":" in e
+                )
+                req_lines.append(
+                    f"- {r.get('id', '?')} [{priority}] {title} | edges: {edge_cats}"
+                )
+            parts.append(
+                f"### Sidecar summary ({len(reqs)} REQ-F):\n" + "\n".join(req_lines)
+            )
+        except Exception as e:
+            logger.warning(f"Could not read sidecar for summary: {e}")
+
+    if srs_text:
+        headings = re.findall(r"^#{1,4}\s+.+$", srs_text, flags=re.MULTILINE)
+        if headings:
+            parts.append("### SRS heading skeleton:\n" + "\n".join(headings[:80]))
+
+    if not parts:
+        return srs_text[:4000]
+
+    return "\n\n".join(parts)
 
 SYSTEM_SUCCESS = (
     "You are a lessons-learned distiller. Given the original requirement, the "
@@ -58,9 +105,13 @@ def run(state):
     score = state.get("score", 0)
     success = score >= SCORE_THRESHOLD
 
+    srs_summary = _summarize_srs(
+        state.get("srs", ""),
+        sidecar_path=state.get("srs_sidecar_path", "workspace/current_srs.json"),
+    )
     user = (
         f"Original requirement:\n{state.get('input', '')}\n\n"
-        f"Final SRS:\n{state.get('srs', '')}\n\n"
+        f"SRS summary (heading skeleton + per-REQ-F facts):\n{srs_summary}\n\n"
         f"QA feedback:\n{state.get('qa', '')}\n\n"
         f"Score: {score}"
     )
